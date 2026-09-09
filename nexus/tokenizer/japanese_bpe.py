@@ -30,6 +30,8 @@ class JapaneseBPETokenizer:
             byte_fallback=True,
             pad_id=3,
             user_defined_symbols=[
+                "<user>", "</user>",
+                "<assistant>", "</assistant>",
                 "<tool_call>", "</tool_call>",
                 "<tool_response>", "</tool_response>",
                 "<think>", "</think>",
@@ -109,15 +111,28 @@ def prepare_japanese_seed_corpus(output_path: str):
 
 if __name__ == "__main__":
     work_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(os.path.dirname(work_dir), "data")
     corpus_file = os.path.join(work_dir, "seed_corpus.txt")
     model_prefix = os.path.join(work_dir, "nexus_ja_bpe")
     
     print("Step 1: Generating Japanese Seed Corpus...")
     prepare_japanese_seed_corpus(corpus_file)
     
-    print("Step 2: Training Japanese BPE Tokenizer...")
-    tok = JapaneseBPETokenizer(model_prefix=model_prefix, vocab_size=1000)
-    tok.train_from_corpus(corpus_file)
+    train_files = [corpus_file]
+    massive_corpus = os.path.join(data_dir, "nexus_massive_pretrain.txt")
+    if os.path.exists(massive_corpus):
+        train_files.append(massive_corpus)
+    sft_corpus = os.path.join(data_dir, "nexus_conversational_sft.txt")
+    if os.path.exists(sft_corpus):
+        train_files.append(sft_corpus)
+    wiki_corpus = os.path.join(data_dir, "ja_wikipedia_corpus.txt")
+    if os.path.exists(wiki_corpus):
+        train_files.append(wiki_corpus)
+
+    merged_input = ",".join(train_files)
+    print(f"Step 2: Training Japanese BPE Tokenizer on {len(train_files)} corpora (vocab_size=8000)...")
+    tok = JapaneseBPETokenizer(model_prefix=model_prefix, vocab_size=8000)
+    tok.train_from_corpus(merged_input)
     
     test_text = "Mojo言語とTitansアーキテクチャを用いた次世代日本語AIの開発。"
     stats = tok.get_compression_ratio(test_text)

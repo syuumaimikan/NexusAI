@@ -36,6 +36,15 @@ def pack_ternary_weights(w_int8: torch.Tensor) -> bytes:
 
     return bytes(byte_arr)
 
+def extract_ternary_weights(layer: torch.nn.Module):
+    if hasattr(layer, "get_ternary_weights"):
+        return layer.get_ternary_weights()
+    w = layer.weight.detach()
+    w_scale = w.abs().mean().clamp(min=1e-5)
+    w_norm = w / w_scale
+    w_quant = torch.clamp(torch.round(w_norm), -1.0, 1.0).to(torch.int8)
+    return w_quant, float(w_scale.item())
+
 def export_model_to_nexus_binary(model: torch.nn.Module, output_path: str):
     """
     Exports a trained NexusTitansLM model to a portable .nexus binary file.
@@ -69,7 +78,7 @@ def export_model_to_nexus_binary(model: torch.nn.Module, output_path: str):
         total_packed_bytes = 0
 
         for name, layer in linear_layers.items():
-            w_quant, scale = layer.get_ternary_weights()
+            w_quant, scale = extract_ternary_weights(layer)
             packed_bytes = pack_ternary_weights(w_quant)
             out_dim, in_dim = w_quant.shape
 

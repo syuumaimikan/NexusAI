@@ -67,15 +67,27 @@ def main():
                 print(f"{CYAN}💬 対話モードに切り替えました (ChatGPT equivalent){RESET}")
                 continue
 
+            elif user_input.startswith("/chat "):
+                current_mode = "chat"
+                user_input = user_input[6:].strip()
+
             elif user_input == "/code":
                 current_mode = "code"
                 print(f"{GREEN}💻 コーディング・エージェントモードに切り替えました (Claude Code equivalent){RESET}")
                 continue
 
+            elif user_input.startswith("/code "):
+                current_mode = "code"
+                user_input = user_input[6:].strip()
+
             elif user_input == "/research":
                 current_mode = "research"
                 print(f"{MAGENTA}🔍 Web・知識リサーチモードに切り替えました{RESET}")
                 continue
+
+            elif user_input.startswith("/research "):
+                current_mode = "research"
+                user_input = user_input[10:].strip()
 
             elif user_input == "/memory":
                 mem_count = len(agent.long_term_memory)

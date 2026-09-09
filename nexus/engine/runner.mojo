@@ -257,7 +257,7 @@ struct NexusEngine:
 
 def main() raises:
     print("=== Nexus-Titans: High-Speed Native Mojo Inference Engine ===")
-    var engine = NexusEngine(vocab_size=1000, d_model=128, d_mem=64, d_ffn=256)
+    var engine = NexusEngine(vocab_size=1500, d_model=128, d_mem=64, d_ffn=256)
     var model_path = String("/home/syuum/NexusAI/nexus/engine/nexus_titans.nexus")
     engine.load_binary_checkpoint(model_path)
 

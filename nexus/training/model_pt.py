@@ -34,7 +34,7 @@ class BitLinear(nn.Linear):
             y = y + self.bias
         return y
 
-    def get_ternary_weights(self) -> torch.Tensor:
+    def get_ternary_weights(self) -> Tuple[torch.Tensor, float]:
         """Returns discretized {-1, 0, 1} integer tensor and scale factor."""
         w_scale = self.weight.abs().mean().clamp(min=1e-5)
         w_normalized = self.weight / w_scale
@@ -53,7 +53,7 @@ class TitansNeuralMemory(nn.Module):
         self.lr = lr
         self.decay = decay
 
-        # Projections
+        # Projections (BitNet 1.58 ternary linear)
         self.q_proj = BitLinear(d_model, d_mem)
         self.k_proj = BitLinear(d_model, d_mem)
         self.v_proj = BitLinear(d_model, d_mem)
@@ -104,6 +104,7 @@ class TitansNeuralMemory(nn.Module):
         return y_all, avg_surprise
 
 class SwiGLUFFN(nn.Module):
+    """SwiGLU Feed-Forward Network using BitNet b1.58 ternary projections."""
     def __init__(self, d_model: int, d_ffn: int):
         super().__init__()
         self.gate_proj = BitLinear(d_model, d_ffn)
@@ -115,39 +116,91 @@ class SwiGLUFFN(nn.Module):
         up = self.up_proj(x)
         return self.down_proj(gate * up)
 
+class CausalConv1d(nn.Module):
+    """
+    Local Short-Term Memory via Causal Depthwise 1D Convolution.
+    Implements Google Titans MAC/MAG design principle: combines local n-gram context
+    with Neural Long-Term Memory (LTM) without requiring KV-cache.
+    """
+    def __init__(self, d_model: int, kernel_size: int = 4):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.conv = nn.Conv1d(d_model, d_model, kernel_size=kernel_size, groups=d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, D] -> transpose for Conv1d -> [B, D, T]
+        x_trans = x.transpose(1, 2)
+        x_pad = F.pad(x_trans, (self.kernel_size - 1, 0)) # Causal left-padding
+        y = self.conv(x_pad).transpose(1, 2)
+        return y
+
+class NexusBlock(nn.Module):
+    """
+    Unified Nexus Block combining:
+    1. Short-Term Memory: Causal Depthwise Conv1d (O(1) local syntax context)
+    2. Long-Term Memory: Google Titans Neural LTM (O(1) online test-time memory)
+    3. BitNet b1.58 SwiGLU FFN: Pure ternary {-1, 0, 1} feedforward computation
+    """
+    def __init__(self, d_model: int, d_mem: int, d_ffn: int):
+        super().__init__()
+        self.norm1 = nn.RMSNorm(d_model)
+        self.local_conv = CausalConv1d(d_model, kernel_size=4)
+        self.titans_memory = TitansNeuralMemory(d_model, d_mem)
+        self.norm2 = nn.RMSNorm(d_model)
+        self.ffn = SwiGLUFFN(d_model, d_ffn)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        norm_x = self.norm1(x)
+        h_conv = self.local_conv(norm_x)
+        h_mem, s = self.titans_memory(norm_x)
+        x = x + h_conv + h_mem
+        x = x + self.ffn(self.norm2(x))
+        return x, s
+
 class NexusTitansLM(nn.Module):
     """
     Complete Nexus-Titans Causal Language Model.
+    Adheres strictly to the BitNet b1.58 design standard (Microsoft Research):
+    - All hidden layer linear projections (QKV, Out, FFN Gate/Up/Down) are 1.58-bit ternary.
+    - Token Embedding and LM Output Head maintain full floating-point precision for vocabulary discrimination.
+    - Infinite context retention through Google Titans Test-Time Learning.
+    - Local syntax and indentation retention through Causal Conv1D short-term memory.
     """
-    def __init__(self, vocab_size: int, d_model: int = 128, d_mem: int = 64, d_ffn: int = 256):
+    def __init__(self, vocab_size: int, d_model: int = 256, d_mem: int = 128, d_ffn: int = 512, n_layers: int = 2, max_seq_len: int = 2048):
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self.d_mem = d_mem
+        self.d_ffn = d_ffn
+        self.n_layers = n_layers
+        self.max_seq_len = max_seq_len
+
         self.token_embeddings = nn.Embedding(vocab_size, d_model)
-        self.titans_memory = TitansNeuralMemory(d_model, d_mem)
-        self.ffn = SwiGLUFFN(d_model, d_ffn)
-        self.norm1 = nn.RMSNorm(d_model)
-        self.norm2 = nn.RMSNorm(d_model)
-        self.lm_head = BitLinear(d_model, vocab_size)
+        self.pos_embeddings = nn.Embedding(max_seq_len, d_model)
+        self.layers = nn.ModuleList([NexusBlock(d_model, d_mem, d_ffn) for _ in range(n_layers)])
+        self.norm_f = nn.RMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        # Backwards-compatible convenience references to layer 0
+        self.titans_memory = self.layers[0].titans_memory
+        self.ffn = self.layers[0].ffn
 
     def forward(self, input_ids: torch.Tensor, targets: Optional[torch.Tensor] = None):
-        x = self.token_embeddings(input_ids) # [B, T, d_model]
-        
-        # Titans LTM block
-        h_norm1 = self.norm1(x)
-        mem_out, surprise_loss = self.titans_memory(h_norm1)
-        x = x + mem_out
+        B, T = input_ids.shape
+        pos = torch.arange(0, T, dtype=torch.long, device=input_ids.device)
+        x = self.token_embeddings(input_ids) + self.pos_embeddings(pos)
+        total_surprise = 0.0
 
-        # SwiGLU FFN block
-        h_norm2 = self.norm2(x)
-        x = x + self.ffn(h_norm2)
+        for layer in self.layers:
+            x, s = layer(x)
+            total_surprise = total_surprise + s
 
+        x = self.norm_f(x)
         logits = self.lm_head(x) # [B, T, vocab_size]
 
         loss = None
         if targets is not None:
-            # Language modeling cross-entropy loss + surprise regularization
             ce_loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
-            loss = ce_loss + 0.1 * surprise_loss
+            loss = ce_loss + 0.05 * total_surprise
 
-        return logits, loss, surprise_loss
+        return logits, loss, total_surprise
