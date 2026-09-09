@@ -97,6 +97,7 @@ def test_agent_tools_execution():
     agent.tool_bash_execute(f"rm -f {test_file}")
     
     # 3. Test Titans memory absorption
+    init_mem_len = len(agent.long_term_memory)
     absorb_res = agent.tool_memory_absorb("Fact: Titans uses surprise metric for test-time training.")
     assert "吸収完了" in absorb_res
-    assert len(agent.long_term_memory) == 1
+    assert len(agent.long_term_memory) == init_mem_len + 1

@@ -14,3 +14,4 @@ __pycache__/
 # Model checkpoints & binary weights
 *.pt
 *.nexus
+.titans_memory.json

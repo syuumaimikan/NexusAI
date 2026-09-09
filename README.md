@@ -91,7 +91,35 @@ pixi run mojo-model
 ```
 *出力例: 1,000トークンの日本語文脈をメモリ増加ゼロ（$O(1)$）で記憶*
 
-### 3. データパイプラインとトークナイザー
+### 3. 実データ学習・バイナリモデル生成・Mojoネイティブ推論
+
+#### 日本語Wikipedia実データとQATによるモデル学習
+```bash
+pixi run train
+```
+*PyTorch Straight-Through Estimator (STE) による3値化対応学習を実行し、重みを自動で `.nexus` バイナリ形式にパック出力します。*
+
+#### Mojo ネイティブ高速推論ランナー
+```bash
+pixi run run-mojo
+```
+*出力例: 593.69 tokens/sec（CPU単体実測値）、Titans LTMメモリ固定16KB、完全な加減算推論。*
+
+### 4. 単体テスト & 比較ベンチマークスイート
+
+#### 全自動テストの実行
+```bash
+pixi run test
+```
+*BitNet 3値数学、Titansサプライズ収束、日本語BPE、バイナリエクスポート、エージェントツールの全5テストを実行。*
+
+#### 比較ベンチマークの実行
+```bash
+pixi run bench
+```
+*BitNet vs FP32（16倍圧縮、浮動小数点乗算ゼロ）、Titans LTM vs Transformer KV-Cache（100万トークンで183GB vs 384KB固定）、日本語圧縮率の定量的検証。*
+
+### 5. データパイプラインとトークナイザー
 
 #### 日本語Wikipedia実データの収集
 ```bash

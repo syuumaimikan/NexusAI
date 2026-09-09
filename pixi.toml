@@ -15,6 +15,7 @@ curate-data = "python nexus/data/curate_datasets.py"
 train = "python nexus/training/train.py"
 run-mojo = "mojo run nexus/engine/runner.mojo"
 test = "pytest tests/ -v"
+bench = "python benchmarks/benchmark.py"
 
 [dependencies]
 mojo = ">=1.0.0,<2"
