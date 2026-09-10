@@ -27,12 +27,13 @@ class NexusAgent:
         self.load_memory()
 
         # Load trained neural model and tokenizer
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tok = None
         self.model = None
         self.init_neural_model()
 
     def init_neural_model(self):
-        """Loads trained weights and tokenizer into memory."""
+        """Loads trained weights and tokenizer into memory with GPU acceleration."""
         try:
             tok_path = os.path.join(self.workspace_root, "nexus", "tokenizer", "nexus_ja_bpe")
             self.tok = JapaneseBPETokenizer(tok_path)
@@ -40,14 +41,14 @@ class NexusAgent:
 
             ckpt_path = os.path.join(self.workspace_root, "nexus", "training", "nexus_checkpoint.pt")
             if os.path.exists(ckpt_path):
-                ckpt = torch.load(ckpt_path, map_location="cpu")
+                ckpt = torch.load(ckpt_path, map_location=self.device)
                 self.model = NexusTitansLM(
                     vocab_size=ckpt["vocab_size"],
                     d_model=ckpt["d_model"],
                     d_mem=ckpt["d_mem"],
                     d_ffn=ckpt["d_ffn"],
                     n_layers=ckpt.get("n_layers", 2)
-                )
+                ).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
         except Exception as e:
@@ -140,8 +141,54 @@ class NexusAgent:
         return self.tool_bash_execute(cmd)
 
     def tool_web_search(self, query: str) -> str:
-        """Performs a web search or Wikipedia knowledge retrieval."""
+        """Performs a web search or Wikipedia knowledge retrieval with rich article summaries."""
+        # 1. Check local pre-trained Wikipedia encyclopedia corpus first
+        try:
+            local_wiki = os.path.join(self.workspace_root, "nexus", "data", "ja_wikipedia_corpus.txt")
+            if os.path.exists(local_wiki):
+                with open(local_wiki, "r", encoding="utf-8") as f:
+                    content = f.read()
+                sections = content.split("# ")
+                for sec in sections:
+                    if not sec.strip():
+                        continue
+                    sec_lines = sec.strip().split("\n")
+                    sec_title = sec_lines[0].strip()
+                    if query.lower() in sec_title.lower() or sec_title.lower() in query.lower():
+                        sec_body = "\n\n".join(sec_lines[1:5])
+                        return f"### {sec_title} (Wikipedia百科事典)\n{sec_body}"
+        except Exception:
+            pass
+
         url = "https://ja.wikipedia.org/w/api.php"
+        headers = {"User-Agent": "NexusAI-Researcher/1.0 (https://github.com/syuum/NexusAI)"}
+
+        # 2. Try fetching rich article introduction via Wikipedia API
+        try:
+            params = {
+                "action": "query",
+                "format": "json",
+                "titles": query,
+                "prop": "extracts",
+                "explaintext": True,
+                "exintro": True
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                pages = data.get("query", {}).get("pages", {})
+                for pid, pdata in pages.items():
+                    if pid != "-1" and pdata.get("extract"):
+                        summary = pdata["extract"].strip()
+                        lines = [l.strip() for l in summary.split("\n") if l.strip()]
+                        short_summary = "\n\n".join(lines[:4])
+                        if len(short_summary) > 600:
+                            short_summary = short_summary[:600] + "..."
+                        return f"### {pdata.get('title', query)}\n{short_summary}"
+        except Exception:
+            pass
+
+        # 3. Fallback to OpenSearch
         params = {
             "action": "opensearch",
             "search": query,
@@ -149,9 +196,8 @@ class NexusAgent:
             "namespace": 0,
             "format": "json"
         }
-        headers = {"User-Agent": "NexusAI-Researcher/1.0"}
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp = requests.get(url, params=params, headers=headers, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 titles = data[1]
@@ -159,7 +205,8 @@ class NexusAgent:
                 links = data[3]
                 results = []
                 for t, d, l in zip(titles, descriptions, links):
-                    results.append(f"• **{t}**: {d} ({l})")
+                    desc = f": {d}" if d else ""
+                    results.append(f"• **{t}**{desc} ({l})")
                 if results:
                     return "\n".join(results)
             return f"[Web Search] 検索結果が見つかりませんでした: '{query}'"
@@ -184,7 +231,7 @@ class NexusAgent:
         if not input_ids:
             return ""
 
-        curr_ids = torch.tensor([input_ids], dtype=torch.long)
+        curr_ids = torch.tensor([input_ids], dtype=torch.long, device=self.device)
         generated = []
 
         eos_id = self.tok.sp.eos_id()
@@ -223,7 +270,7 @@ class NexusAgent:
                     break
 
                 generated.append(next_id)
-                curr_ids = torch.cat([curr_ids, torch.tensor([[next_id]])], dim=1)
+                curr_ids = torch.cat([curr_ids, torch.tensor([[next_id]], device=self.device)], dim=1)
 
         raw_text = self.tok.decode(generated).strip()
         # Clean special tokens if dangling
@@ -255,11 +302,14 @@ class NexusAgent:
         # Tool intent detection
         is_cpu_query = any(k in clean_input.lower() for k in ["cpu", "プロセッサ", "cpuスペック"])
         is_gpu_query = any(k in clean_input.lower() for k in ["gpu", "グラボ", "vram", "gpuスペック"])
-        is_test_query = any(k in clean_input for k in ["テスト", "test", "pytest"])
+        is_test_query = any(k in clean_input for k in ["テスト", "test", "pytest"]) and not any(k in clean_input for k in ["テスト時", "テストデータ"])
         is_mojo_ver = any(k in clean_input.lower() for k in ["mojo", "バージョン"])
-        is_grep_query = any(k in clean_input for k in ["grep", "探して", "コード検索", "シンボル", "定義"])
-        is_search_query = any(k in clean_input for k in ["検索", "リサーチ", "調査", "最新", "web検索"])
-        is_file_read = any(k in clean_input for k in ["ファイルの中身", "コードを見せて", "read", "view"])
+        is_grep_query = any(k in clean_input for k in ["grep", "コード検索", "コード内の"]) or ("探して" in clean_input and any(c in clean_input for c in ["コード", "ファイル", "定義", "struct", "fn"]))
+        is_search_query = (mode == "research") or any(k in clean_input for k in [
+            "について教えて", "とは何", "とは", "って何", "の歴史", "の地理", "教えて", "解説して",
+            "web検索", "wikipediaで検索", "ネットで検索", "ググって", "調べ"
+        ]) and not any(k in clean_input for k in ["コード", "ファイル", "スペック", "テスト"])
+        is_file_read = any(k in clean_input for k in ["ファイルの中身", "コードを見せて", "ファイルを表示"])
 
         observations = []
         thought_step = ""
@@ -303,12 +353,16 @@ class NexusAgent:
             observations.append(f"<tool_call>web_search(query='{clean_q}')</tool_call>\n<tool_response>{res}</tool_response>")
             self.tool_memory_absorb(f"Search '{clean_q}': {res[:200]}")
 
-        # Formulate neural prompt for model completion
-        neural_prompt = f"<user>{clean_input}</user>\n<assistant>"
-        neural_response = self.generate_neural(neural_prompt, max_tokens=256)
+        # Formulate neural prompt only when purely conversational / coding without dedicated tools
+        neural_response = ""
+        has_tool_handled = any([is_cpu_query, is_gpu_query, is_test_query, is_grep_query, is_search_query, is_file_read])
+
+        if not has_tool_handled:
+            neural_prompt = f"<user>{clean_input}</user>\n<assistant>"
+            neural_response = self.generate_neural(neural_prompt, max_tokens=100)
 
         # Check if model generated its own <think> trace
-        think_match = re.search(r"<think>(.*?)</think>", neural_response, flags=re.DOTALL)
+        think_match = re.search(r"<think>(.*?)</think>", neural_response, flags=re.DOTALL) if neural_response else None
         if think_match:
             thought_content = think_match.group(1).strip()
             thought_trace = f"<think>\n{thought_content}\n</think>"
@@ -345,7 +399,10 @@ class NexusAgent:
             )
         elif is_search_query:
             response_parts.append(
-                f"リサーチ結果をまとめました。得られた知識はTitansの長期記憶モジュールにも吸収済みです。"
+                f"**【{clean_q} に関する知識・調査結果】**\n"
+                f"Wikipedia百科事典ベースより取得した知識です：\n\n"
+                f"{res}\n\n"
+                f"※この知識はGoogle Titansのニューラル長期記憶（LTM）にオンライン吸収され、以降の推論文脈で活用されます。"
             )
         else:
             # Genuinely conversational / coding answer directly from the trained neural model

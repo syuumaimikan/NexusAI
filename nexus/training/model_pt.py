@@ -69,38 +69,37 @@ class TitansNeuralMemory(nn.Module):
         q = self.q_proj(x) # [B, T, d_mem]
         k = self.k_proj(x) # [B, T, d_mem]
         v = self.v_proj(x) # [B, T, d_mem]
+        alpha = torch.sigmoid(self.alpha_proj(x)) # [B, T, 1] - Precomputed across sequence
 
-        outputs = []
-        total_surprise_loss = 0.0
+        y_mems = []
+        v_hats = []
         current_M = self.M.clone()
 
         for t in range(T):
             q_t = q[:, t] # [B, d_mem]
             k_t = k[:, t] # [B, d_mem]
             v_t = v[:, t] # [B, d_mem]
-            x_t = x[:, t]
+            alpha_t = alpha[:, t].mean()
 
             # 1. Retrieve from memory: y = M * q
             y_mem = torch.matmul(q_t, current_M.T) # [B, d_mem]
-            out_t = self.out_proj(y_mem) # [B, d_model]
-            outputs.append(out_t)
+            y_mems.append(y_mem)
 
-            # 2. Associative memory prediction and surprise metric
+            # 2. Associative memory prediction
             v_hat = torch.matmul(k_t, current_M.T) # [B, d_mem]
-            surprise_t = F.mse_loss(v_hat, v_t)
-            total_surprise_loss += surprise_t
+            v_hats.append(v_hat)
 
-            # 3. Dynamic forgetting gate
-            alpha_t = torch.sigmoid(self.alpha_proj(x_t)).mean()
-
-            # 4. Online update of memory matrix
+            # 3. Online update of memory matrix
             err_t = (v_t - v_hat).mean(dim=0, keepdim=True) # [1, d_mem]
             k_mean = k_t.mean(dim=0, keepdim=True) # [1, d_mem]
             grad_step = self.lr * torch.matmul(err_t.T, k_mean) # [d_mem, d_mem]
             current_M = (1.0 - alpha_t * self.decay) * current_M + grad_step
 
-        y_all = torch.stack(outputs, dim=1) # [B, T, d_model]
-        avg_surprise = total_surprise_loss / max(1, T)
+        y_all_mem = torch.stack(y_mems, dim=1) # [B, T, d_mem]
+        y_all = self.out_proj(y_all_mem) # [B, T, d_model] - 1 single Batched BitLinear call
+
+        v_hat_all = torch.stack(v_hats, dim=1) # [B, T, d_mem]
+        avg_surprise = F.mse_loss(v_hat_all, v)
         return y_all, avg_surprise
 
 class SwiGLUFFN(nn.Module):
